@@ -32,6 +32,8 @@ class MainViewController: UIViewController {
     
     private let bag = DisposeBag()
     private let images = Variable<[UIImage]>([])
+    private var imageCache = [Int]()
+    
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
@@ -42,8 +44,10 @@ class MainViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         
-        images.asObservable().subscribe(onNext: { [weak self] photos in
-            guard let preview = self?.imagePreview else { return }
+        images.asObservable()
+            .throttle(0.5, scheduler: MainScheduler.instance)
+            .subscribe(onNext: { [unowned self] photos in
+            guard let preview = self.imagePreview else { return }
             preview.image = UIImage.collage(images: photos, size: preview.frame.size)
         }).disposed(by: bag)
         
@@ -61,8 +65,9 @@ class MainViewController: UIViewController {
         title = photos.count > 0 ? "\(photos.count) photos" : "Collage"
     }
     
-    @IBAction func actionClear() {
-          images.value = []
+    @IBAction func actionClear() {        
+        images.value = []
+        imageCache = []
     }
     
     @IBAction func actionSave() {
@@ -75,23 +80,38 @@ class MainViewController: UIViewController {
                 self?.showMessage(title: "Error", message: error.localizedDescription)
                     .subscribe(onCompleted: {
                         print("Tappiou o button..")
-                })
+                }).dispose()
                 
             },onCompleted: { [weak self] in
                 self?.showMessage(title: "Saved", message: "")
                     .subscribe(onCompleted: {
                         print("Tappiou o button..")
-                    })
+                    }).dispose()
                 self?.actionClear()
                 
         }).disposed(by: bag)
     }
     
     @IBAction func actionAdd() {
-//        images.value.append(UIImage(named: "IMG_1907.jpg")!)
         let photosViewController = storyboard!.instantiateViewController(withIdentifier: "PhotosViewController") as! PhotosViewController
         
-        photosViewController.selectedPhoto.subscribe(
+        let newPhotos = photosViewController.selectedPhoto.share()
+        newPhotos
+            .takeWhile { [weak self] image in
+                return (self?.images.value.count ?? 0) < 6
+            }
+            .filter { newImage in
+                return newImage.size.width > newImage.size.height //Just accept image in landscape
+            
+            }.filter { [weak self] newImage in
+                let len = UIImagePNGRepresentation(newImage)?.count ?? 0
+                guard self?.imageCache.contains(len) == false else {
+                    return false
+                }
+                self?.imageCache.append(len)
+                return true
+            }
+            .subscribe(
             onNext: { [weak self] image in
                 guard let images = self?.images else { return }
                 images.value.append(image)
@@ -106,7 +126,23 @@ class MainViewController: UIViewController {
                 print("completed photo selected")
         }).disposed(by: photosViewController.bag)
         
+        newPhotos.ignoreElements()
+            .subscribe(onCompleted: { [weak self] in
+            self?.updateNavigationIcon()
+        }).disposed(by: photosViewController.bag)
+        
+        
         navigationController?.pushViewController(photosViewController, animated: true)        
+    }
+    
+    private func updateNavigationIcon() {
+        let icon = imagePreview.image?
+            .scaled(CGSize(width: 22, height: 22))
+            .withRenderingMode(.alwaysOriginal)
+        navigationItem.leftBarButtonItem = UIBarButtonItem(image: icon,
+                                                           style: .done,
+                                                           target: nil,
+                                                           action: nil)
     }
     
     func showMessage(_ title: String, description: String? = nil) {
@@ -114,24 +150,4 @@ class MainViewController: UIViewController {
         alert.addAction(UIAlertAction(title: "Close", style: .default, handler: { [weak self] _ in self?.dismiss(animated: true, completion: nil)}))
         present(alert, animated: true, completion: nil)
     }
-}
-
-extension UIViewController {
-    
-    func showMessage(title: String, message: String) -> Observable<Void> {
-        return Observable.create({ [weak self] (observer) -> Disposable in
-            
-            let alert = UIAlertController(title: title,
-                                          message: message,
-                                          preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "Close",
-                                          style: .default,
-                                          handler: { (_) in
-                                        observer.onCompleted()
-            }))
-            self?.present(alert, animated: true)
-            return Disposables.create()
-        })
-    }
-    
 }
